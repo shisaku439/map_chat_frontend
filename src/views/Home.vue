@@ -4,6 +4,11 @@ import { onMounted, ref, watch } from 'vue'
 import L from 'leaflet'
 import { io, Socket } from 'socket.io-client'
 import { useGeolocation } from '@vueuse/core'
+import { useAuthStore } from '../stores/auth'
+// マーカークラスタリング（重なりをまとめて表示）
+import 'leaflet.markercluster/dist/MarkerCluster.css'
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
+import 'leaflet.markercluster'
 
 const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? 'http://localhost:5000'
 
@@ -16,6 +21,20 @@ let accuracyCircle: L.Circle | null = null
 // 画面下部に表示するイベント/状態ログ
 const logs = ref<string[]>([])
 let socket: Socket | null = null
+const auth = useAuthStore()
+const message = ref('')
+const isPosting = ref(false)
+// 周辺投稿（Day5）
+const radius = ref(300) // 100〜500m
+// 近傍投稿の状態と、地図上に描画するクラスタレイヤ
+const nearby = ref<{ id: number; userId: number; message: string; lat: number; lng: number; createdAt: string; distance: number }[]>([])
+let nearbyLayer: L.MarkerClusterGroup | null = null
+
+// 「代表」ポップアップ：ズームしても常に見える吹き出しを維持するための基準マーカー
+let representativeMarker: L.Marker | null = null
+
+// ズームイベントへのハンドラを重複で貼らないためのフラグ
+let popupPersistAttached = false
 
 // ログを先頭に積む（時刻付き）
 function addLog(text: string) {
@@ -86,6 +105,135 @@ function recenterToUser() {
   updateUserLocationOnMap()
 }
 
+// 周辺投稿の取得
+async function fetchNearby() {
+  const lat = coords.value?.latitude
+  const lng = coords.value?.longitude
+  if (lat == null || lng == null) {
+    addLog('現在地が未取得のため周辺投稿を取得できません')
+    return
+  }
+  try {
+    const url = new URL(`${API_ORIGIN}/api/posts`)
+    url.searchParams.set('lat', String(lat))
+    url.searchParams.set('lng', String(lng))
+    url.searchParams.set('radius', String(radius.value))
+    const res = await fetch(url.toString())
+    const data = await res.json()
+    if (!res.ok) {
+      addLog(`周辺取得エラー: ${JSON.stringify(data)}`)
+      return
+    }
+    nearby.value = data.items ?? []
+    renderNearbyMarkers()
+    addLog(`周辺 ${nearby.value.length} 件`)
+  } catch (e) {
+    addLog(`周辺取得エラー: ${String(e)}`)
+  }
+}
+
+// 周辺投稿を地図に描画
+// 近傍投稿をクラスタ表示し、代表ポップアップを開く
+function renderNearbyMarkers() {
+  if (!map) return
+  if (!nearbyLayer) {
+    nearbyLayer = L.markerClusterGroup({
+      showCoverageOnHover: false,
+      maxClusterRadius: 60,
+    }) as L.MarkerClusterGroup
+    map.addLayer(nearbyLayer)
+  }
+  nearbyLayer!.clearLayers()
+  let firstMarker: L.Marker | null = null
+  nearby.value.forEach((p, idx) => {
+    const m = L.marker([p.lat, p.lng])
+    m.bindPopup(`${p.message}<br/>距離: ${p.distance}m`, {
+      autoClose: false,
+      closeOnClick: false,
+    })
+    nearbyLayer!.addLayer(m)
+    if (idx === 0) firstMarker = m
+  })
+  representativeMarker = firstMarker
+  openRepresentativePopup()
+  if (!popupPersistAttached && map) {
+    popupPersistAttached = true
+    // ズームでクラスタ構造が変わるたびに代表ポップアップを開き直す
+    map.on('zoomend', openRepresentativePopup)
+  }
+}
+
+// 代表ポップアップを開く
+// - 代表がクラスター内に吸収されている場合は、クラスター自身に子マーカーの内容を束ねたポップアップを表示
+// - 個別マーカーとして可視なら、そのマーカーのポップアップを開く
+function openRepresentativePopup() {
+  if (!map || !nearbyLayer || !representativeMarker) return
+  // いったん既存のポップアップを閉じる
+  map.closePopup()
+  const grp: any = nearbyLayer as any
+  const parent: any = grp.getVisibleParent(representativeMarker)
+  if (parent && parent !== representativeMarker) {
+    const children = parent.getAllChildMarkers ? parent.getAllChildMarkers() : [representativeMarker]
+    const html = children
+      .slice(0, 5)
+      .map((cm: any) => (cm.getPopup && cm.getPopup()) ? cm.getPopup().getContent() : '')
+      .join('<hr/>')
+    if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(html)
+    else parent.bindPopup(html, { autoClose: false, closeOnClick: false })
+    parent.openPopup()
+  } else {
+    representativeMarker.openPopup()
+  }
+}
+
+// 投稿処理（最大280文字、現在地必須、要ログイン）
+async function submitPost() {
+  if (!auth.isAuthenticated) {
+    addLog('未ログインのため投稿できません')
+    return
+  }
+  const text = message.value.trim()
+  if (!text) {
+    addLog('メッセージは必須です')
+    return
+  }
+  if (text.length > 280) {
+    addLog('メッセージは280文字以内で入力してください')
+    return
+  }
+  const lat = coords.value?.latitude
+  const lng = coords.value?.longitude
+  if (lat == null || lng == null) {
+    addLog('現在地が取得できていません')
+    return
+  }
+  isPosting.value = true
+  try {
+    const res = await fetch(`${API_ORIGIN}/api/posts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${auth.token}`,
+      },
+      body: JSON.stringify({ message: text, lat, lng }),
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) {
+      const msg = data?.error?.message ?? `投稿に失敗しました (${res.status})`
+      addLog(msg)
+      return
+    }
+    addLog(`投稿成功: ${JSON.stringify(data)}`)
+    message.value = ''
+    // 投稿後に周辺リロード
+    fetchNearby()
+  } catch (e) {
+    addLog(`投稿エラー: ${String(e)}`)
+  } finally {
+    isPosting.value = false
+  }
+}
+
 onMounted(() => {
   // 地図の初期化（東京駅付近に仮センタリング）
   if (mapContainer.value) {
@@ -102,6 +250,12 @@ onMounted(() => {
   // 現在地が更新されたら地図表示に反映
   watch(coords, () => {
     updateUserLocationOnMap()
+    // 位置が取れていれば周辺投稿も更新
+    if (coords.value?.latitude != null) fetchNearby()
+  })
+  // 半径変更で再取得
+  watch(radius, () => {
+    fetchNearby()
   })
 
   socket = io(API_ORIGIN)
@@ -130,6 +284,39 @@ onMounted(() => {
         <div class="text-caption">リアルタイムログ</div>
       </v-col>
     </v-row>
+    <!-- 半径スライダーと周辺再取得 -->
+    <v-row class="mb-2" align="center">
+      <v-col cols="12" md="8">
+        <v-slider
+          v-model="radius"
+          :min="100"
+          :max="500"
+          :step="50"
+          ticks
+          thumb-label
+          label="表示半径(m)"
+        />
+      </v-col>
+      <v-col cols="12" md="4" class="text-md-right">
+        <v-btn variant="tonal" color="primary" @click="fetchNearby">周辺を再取得</v-btn>
+      </v-col>
+    </v-row>
+    <!-- 投稿フォーム（最大280文字、現在地必須、ログイン必須） -->
+    <v-card variant="tonal" class="mb-2">
+      <v-card-text>
+        <v-form @submit.prevent="submitPost">
+          <v-textarea
+            v-model="message"
+            label="いまここメッセージ（280文字まで）"
+            :counter="280"
+            rows="2"
+            auto-grow
+            placeholder="例: 北側の売店が空いてます！"
+          />
+          <v-btn :disabled="isPosting" :loading="isPosting" color="primary" type="submit">投稿</v-btn>
+        </v-form>
+      </v-card-text>
+    </v-card>
     <!-- 位置情報の取得に失敗した場合のユーザー向けエラー表示 -->
     <v-alert v-if="geoError" type="error" variant="tonal" class="mb-2">
       位置情報の取得に失敗しました: {{ geoError?.message }}
