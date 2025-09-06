@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Day3: 現在地取得・地図上のユーザーピン表示・追従/再センタリングUIを実装
-import { onMounted, ref, watch, computed } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import L from 'leaflet'
 import { io, Socket } from 'socket.io-client'
 import { useGeolocation } from '@vueuse/core'
@@ -13,7 +13,9 @@ import 'leaflet.markercluster'
 const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? 'http://localhost:5000'
 
 // Leaflet の地図コンテナ参照とインスタンス
+const mapPage = ref<HTMLDivElement | null>(null)
 const mapContainer = ref<HTMLDivElement | null>(null)
+const mapControlsRef = ref<HTMLDivElement | null>(null)
 let map: L.Map | null = null
 let userMarker: L.Marker | null = null
 let accuracyCircle: L.Circle | null = null
@@ -39,6 +41,14 @@ let representativeMarker: L.Marker | null = null
 
 // ズームイベントへのハンドラを重複で貼らないためのフラグ
 let popupPersistAttached = false
+
+// map-controls の高さに応じて Leaflet のズームコントロールの位置を可変にする
+let controlsResizeObserver: ResizeObserver | null = null
+function updateZoomControlsOffset() {
+  const h = mapControlsRef.value?.offsetHeight ?? 0
+  const offsetPx = Math.max(48, Math.floor(h + 12))
+  mapPage.value?.style.setProperty('--map-controls-offset', `${offsetPx}px`)
+}
 
 // ログはブラウザコンソールへ出力
 function addLog(text: string) {
@@ -385,6 +395,10 @@ onMounted(() => {
     fetchNearby()
   })
 
+  // 地図操作で追従解除（ユーザーがドラッグ/ズームを始めたらOFF）
+  map?.on('dragstart', () => { following.value = false })
+  map?.on('zoomstart', () => { following.value = false })
+
   // どのポップアップを開いても最前面に来るようZ-indexを上げる
   map?.on('popupopen', (e: any) => {
     const el = e?.popup?._container as HTMLElement | undefined
@@ -411,20 +425,32 @@ onMounted(() => {
     popupHandlers.delete(el)
   })
 
+  // map-controls のサイズ変化とリサイズでオフセット更新
+  updateZoomControlsOffset()
+  if ('ResizeObserver' in window && mapControlsRef.value) {
+    controlsResizeObserver = new ResizeObserver(() => updateZoomControlsOffset())
+    controlsResizeObserver.observe(mapControlsRef.value)
+  }
+  window.addEventListener('resize', updateZoomControlsOffset)
+})
+
+onBeforeUnmount(() => {
+  if (controlsResizeObserver && mapControlsRef.value) {
+    controlsResizeObserver.unobserve(mapControlsRef.value)
+  }
+  controlsResizeObserver = null
+  window.removeEventListener('resize', updateZoomControlsOffset)
 })
 </script>
 
 <template>
-  <div class="map-page">
+  <div class="map-page" ref="mapPage">
     <!-- 地図（フルスクリーン） -->
     <div ref="mapContainer" class="map-full" />
 
     <!-- 地図内コントロール -->
-    <div class="map-controls">
-      <v-btn density="comfortable" :color="following ? 'success' : 'grey'" @click="following = !following">
-        {{ following ? '追従ON' : '追従OFF' }}
-      </v-btn>
-      <v-btn density="comfortable" class="ml-2" color="primary" variant="tonal" @click="recenterToUser">現在地へ</v-btn>
+    <div class="map-controls" ref="mapControlsRef">
+      <v-btn density="comfortable" color="primary" variant="tonal" @click="recenterToUser">現在地へ</v-btn>
       <div class="radius-control ml-2">
         <div class="radius-label">半径: {{ radius }}m</div>
         <v-slider v-model="radius" :min="100" :max="3000" :step="100" density="compact" hide-details />
@@ -465,7 +491,8 @@ onMounted(() => {
 .map-page {
   position: relative;
   width: 100%;
-  height: 100dvh;
+  height: 100%; /* ヘッダー/フッター分をVuetifyのレイアウトで差し引いた残り全体 */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 .map-full {
   position: absolute;
@@ -474,11 +501,15 @@ onMounted(() => {
 .map-controls {
   position: absolute;
   /* ヘッダー(v-app-bar app)の高さを考慮して配置 */
-  top: calc(var(--v-layout-top, 0px) + 12px);
+  top: 12px;
   left: 12px;
+  right: 12px; /* 右側も制限して横幅を画面内に収める */
   z-index: 500;
+  max-width: 600px ;
   display: flex;
   align-items: center;
+  flex-wrap: wrap; /* 小幅では折り返す */
+  gap: 8px 10px;
   background: rgba(255, 255, 255, 0.9);
   border-radius: 8px;
   padding: 8px 10px;
@@ -488,12 +519,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 220px;
+  flex: 1 1 240px; /* 可能なら広がり、狭いときは折り返し */
+  min-width: 0; /* 折り返し時のはみ出し防止 */
 }
 .radius-label {
   font-size: 12px;
   color: rgba(0,0,0,0.6);
-  min-width: 80px;
+  min-width: 64px;
 }
 .post-bar {
   position: absolute; /* 地図（map-page）の下側に配置 */
@@ -505,6 +537,8 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 2px 12px rgba(0,0,0,0.15);
   border-radius: 9999px;
+  /* iOSのセーフエリアに配慮 */
+  margin-bottom: env(safe-area-inset-bottom);
 }
 .post-form {
   display: flex;
@@ -526,14 +560,35 @@ onMounted(() => {
   box-shadow: 0 2px 12px rgba(0,0,0,0.18);
 }
 
-/* Leafletのズームコントロールもヘッダー高さ分だけ下げる */
+/* Leafletのズームコントロール位置を map-controls の高さに連動 */
 :global(.leaflet-top.leaflet-left) {
-  top: calc(var(--v-layout-top, 0px) + 60px);
+  top: var(--map-controls-offset, 60px);
   left: 12px;
 }
 :global(.leaflet-top.leaflet-right) {
-  top: calc(var(--v-layout-top, 0px) + 60px);
+  top:  var(--map-controls-offset, 60px);
   right: 12px;
+}
+
+/* Vuetify内部要素の幅制御（スライダーを詰まらせない） */
+:deep(.v-slider) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+:deep(.v-btn) {
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .map-controls {
+    gap: 6px 8px;
+  }
+  .radius-control {
+    flex: 1 1 100%;
+  }
+  .radius-label {
+    min-width: 56px;
+  }
 }
 </style>
 

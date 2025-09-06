@@ -2,7 +2,7 @@
 </script>
 
 <template>
-  <v-app style="width: 100vw; min-height: calc(100dvh - var(--v-layout-top) - var(--v-layout-bottom, 0px));">
+  <v-app style="width: 100vw; height: 100dvh;">
     <v-app-bar app flat density="comfortable">
       <v-app-bar-title style="text-align: left;">Map Chat</v-app-bar-title>
       <v-spacer />
