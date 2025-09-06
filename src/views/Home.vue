@@ -715,6 +715,14 @@ onBeforeUnmount(() => {
   will-change: bottom;
 }
 
+/* 著作権表示は画面の一番右下に固定 */
+:global(.leaflet-control-attribution) {
+  position: fixed !important;
+  right: 6px;
+  bottom: 6px;
+  z-index: 580; /* 投稿フォーム(z-index:600)の下、ズームより低く/高く適宜 */
+}
+
 /* Vuetify内部要素の幅制御（スライダーを詰まらせない） */
 :deep(.v-slider) {
   min-width: 0;
