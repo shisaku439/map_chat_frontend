@@ -3,6 +3,7 @@
 import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import L from 'leaflet'
 import { io, Socket } from 'socket.io-client'
+import PostBar from '../components/PostBar.vue'
 import { useGeolocation } from '@vueuse/core'
 import { useAuthStore } from '../stores/auth'
 // マーカークラスタリング（重なりをまとめて表示）
@@ -65,18 +66,13 @@ function addLog(text: string) {
   console.log(`[${new Date().toLocaleTimeString()}] ${text}`)
 }
 
-// 画面上部に一時的なアラートを表示
+// 画面上部に一時的なアラートを表示（PostBarへ渡す）
 const alertMessage = ref('')
 let alertTimer: number | null = null
 function showAlert(msg: string, ms = 4000) {
   alertMessage.value = msg
-  if (alertTimer) {
-    window.clearTimeout(alertTimer)
-  }
-  alertTimer = window.setTimeout(() => {
-    alertMessage.value = ''
-    alertTimer = null
-  }, ms)
+  if (alertTimer) window.clearTimeout(alertTimer)
+  alertTimer = window.setTimeout(() => { alertMessage.value = ''; alertTimer = null }, ms)
 }
 
 
@@ -552,31 +548,7 @@ onBeforeUnmount(() => {
     </transition>
 
     <!-- 下固定の投稿フォーム -->
-    <div class="post-bar" ref="postBarRef">
-      <!-- アラートをフォーム上のオーバーレイとして表示（レイアウトを変えない） -->
-      <div v-if="alertMessage" class="post-alert">
-        <div class="post-alert-box">
-          <v-alert type="error" variant="flat" density="comfortable">
-            {{ alertMessage }}
-          </v-alert>
-        </div>
-      </div>
-      <v-form class="post-form" @submit.prevent="submitPost" >
-        <v-text-field
-          v-model="message"
-          variant=""
-          density="comfortable"
-          maxlength="280"
-          placeholder="今の気持ちをシェアしよう（最大280文字）"
-          hide-details="auto"
-        >
-          <template #append-inner>
-            <span class="field-counter">{{ message.length }}/280</span>
-          </template>
-        </v-text-field>
-        <v-btn class="ml-2" color="success rounded-pill"  :disabled="isPosting" :loading="isPosting" type="submit">投稿</v-btn>
-      </v-form>
-    </div>
+    <PostBar ref="postBarRef" v-model="message" :loading="isPosting" :alert="alertMessage" @submit="submitPost" />
   </div>
 </template>
 
@@ -674,38 +646,7 @@ onBeforeUnmount(() => {
   color: rgba(0,0,0,0.6);
   min-width: 64px;
 }
-.post-bar {
-  position: absolute; /* 地図（map-page）の下側に配置 */
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
-  z-index: 600;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-  border-radius: 9999px;
-  /* iOSのセーフエリアに配慮 */
-  margin-bottom: env(safe-area-inset-bottom);
-}
-.post-form {
-  display: flex;
-  align-items: center;
-}
-
-/* フォームの上に重ねるアラート（高さを変えない） */
-.post-alert {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 700;
-}
-
-.post-alert-box {
-  background: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-}
+/* PostBarへ移動 */
 
 /* Leafletのズームコントロールを右下へ、投稿フォーム高さに連動 */
 :global(.leaflet-bottom.leaflet-right) {
