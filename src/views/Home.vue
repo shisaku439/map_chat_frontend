@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Day3: 現在地取得・地図上のユーザーピン表示・追従/再センタリングUIを実装
-import { onMounted, ref, watch, computed } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import L from 'leaflet'
 import { io, Socket } from 'socket.io-client'
 import { useGeolocation } from '@vueuse/core'
@@ -13,7 +13,10 @@ import 'leaflet.markercluster'
 const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? 'http://localhost:5000'
 
 // Leaflet の地図コンテナ参照とインスタンス
+const mapPage = ref<HTMLDivElement | null>(null)
 const mapContainer = ref<HTMLDivElement | null>(null)
+const mapControlsRef = ref<HTMLDivElement | null>(null)
+const postBarRef = ref<HTMLDivElement | null>(null)
 let map: L.Map | null = null
 let userMarker: L.Marker | null = null
 let accuracyCircle: L.Circle | null = null
@@ -40,6 +43,22 @@ let representativeMarker: L.Marker | null = null
 // ズームイベントへのハンドラを重複で貼らないためのフラグ
 let popupPersistAttached = false
 
+// map-controls と post-bar の高さに応じて右下配置のオフセットを可変にする
+let controlsResizeObserver: ResizeObserver | null = null
+function updateUiOffsets() {
+  const postH = postBarRef.value?.offsetHeight ?? 0
+  // ズームUI高さをDOMから自動取得（無ければ100pxを既定値に）
+  const zoomEl = mapContainer.value?.querySelector(
+    '.leaflet-bottom.leaflet-right .leaflet-control-zoom'
+  ) as HTMLElement | null
+  const zoomUiHeight = Math.max(zoomEl?.offsetHeight ?? 0, 56)
+  const zoomBottom = Math.max(postH + 12, 56)
+  mapPage.value?.style.setProperty('--zoom-bottom-offset', `${zoomBottom}px`)
+  // コントローラーはズームボタンの“上”に来るよう、ズームUIの高さ＋余白を加算
+  const controlsBottom = zoomBottom + Math.max(zoomUiHeight, 100) + 8
+  mapPage.value?.style.setProperty('--controls-bottom-offset', `${controlsBottom}px`)
+}
+
 // ログはブラウザコンソールへ出力
 function addLog(text: string) {
   // 時刻付きで出力
@@ -65,7 +84,8 @@ function showAlert(msg: string, ms = 4000) {
 // - following: 現在地に地図を追従するかのフラグ
 // - useGeolocation: 高精度・タイムアウトなどのオプションを指定
 const following = ref(true)
-const { coords, error: geoError, resume } = useGeolocation({
+const controlsOpen = ref(true)
+const { coords, resume } = useGeolocation({
   enableHighAccuracy: true,
   maximumAge: 10_000,
   timeout: 10_000,
@@ -124,6 +144,23 @@ function getUserIcon(): L.DivIcon {
 function recenterToUser() {
   following.value = true
   updateUserLocationOnMap()
+}
+
+function toggleControls() {
+  controlsOpen.value = !controlsOpen.value
+  // 折りたたみ直後にズームコントロール位置を更新
+  requestAnimationFrame(() => updateUiOffsets())
+}
+
+// 外側タップで閉じる
+function onGlobalPointerDown(ev: PointerEvent) {
+  if (!controlsOpen.value) return
+  const panel = mapControlsRef.value
+  if (!panel) return
+  const target = ev.target as Node | null
+  if (target && panel.contains(target)) return
+  controlsOpen.value = false
+  requestAnimationFrame(() => updateUiOffsets())
 }
 
 // 周辺投稿の取得
@@ -359,6 +396,8 @@ onMounted(() => {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map)
+    // ズームコントロールを右下へ
+    map.zoomControl.setPosition('bottomright')
   }
 
   // 初回の測位・監視を開始
@@ -384,6 +423,10 @@ onMounted(() => {
     addLog(`post_created: ${JSON.stringify(d)}`)
     fetchNearby()
   })
+
+  // 地図操作で追従解除（ユーザーがドラッグ/ズームを始めたらOFF）
+  map?.on('dragstart', () => { following.value = false })
+  map?.on('zoomstart', () => { following.value = false })
 
   // どのポップアップを開いても最前面に来るようZ-indexを上げる
   map?.on('popupopen', (e: any) => {
@@ -411,29 +454,77 @@ onMounted(() => {
     popupHandlers.delete(el)
   })
 
+  // map-controls / post-bar のサイズ変化とリサイズでオフセット更新
+  updateUiOffsets()
+  if ('ResizeObserver' in window && mapControlsRef.value) {
+    controlsResizeObserver = new ResizeObserver(() => updateUiOffsets())
+    controlsResizeObserver.observe(mapControlsRef.value)
+  }
+  if (postBarRef.value && controlsResizeObserver) {
+    controlsResizeObserver.observe(postBarRef.value)
+  }
+  window.addEventListener('resize', updateUiOffsets)
+  // 外側タップで閉じる（モバイル含む）
+  document.addEventListener('pointerdown', onGlobalPointerDown, { passive: true })
+})
+
+onBeforeUnmount(() => {
+  if (controlsResizeObserver && mapControlsRef.value) {
+    controlsResizeObserver.unobserve(mapControlsRef.value)
+  }
+  if (controlsResizeObserver && postBarRef.value) {
+    controlsResizeObserver.unobserve(postBarRef.value)
+  }
+  controlsResizeObserver = null
+  window.removeEventListener('resize', updateUiOffsets)
+  document.removeEventListener('pointerdown', onGlobalPointerDown)
 })
 </script>
 
 <template>
-  <div class="map-page">
+  <div class="map-page" ref="mapPage">
     <!-- 地図（フルスクリーン） -->
     <div ref="mapContainer" class="map-full" />
 
-    <!-- 地図内コントロール -->
-    <div class="map-controls">
-      <v-btn density="comfortable" :color="following ? 'success' : 'grey'" @click="following = !following">
-        {{ following ? '追従ON' : '追従OFF' }}
-      </v-btn>
-      <v-btn density="comfortable" class="ml-2" color="primary" variant="tonal" @click="recenterToUser">現在地へ</v-btn>
-      <div class="radius-control ml-2">
-        <div class="radius-label">半径: {{ radius }}m</div>
-        <v-slider v-model="radius" :min="100" :max="3000" :step="100" density="compact" hide-details />
-        <v-btn size="small" variant="tonal" @click="fetchNearby">再取得</v-btn>
+    <!-- 地図内コントロール（開閉） -->
+    <transition name="controls-fade">
+      <div v-if="controlsOpen" class="map-controls bottom-right" ref="mapControlsRef">
+        <div class="controls-header">
+
+          <div class="controls-title">オプション</div>
+          <v-spacer />
+          <v-btn icon variant="text" density="comfortable" @click="toggleControls" class="controls-toggle open" aria-label="閉じる">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </div>
+        <div class="controls-body">
+          <div class="option-item">
+            <v-btn density="comfortable" color="primary" variant="tonal" @click="recenterToUser">現在地へ</v-btn>
+            <v-btn size="small" variant="tonal" @click="fetchNearby">再取得</v-btn>
+          </div>
+          <div class="radius-control ml-2">
+            <div class="radius-label">半径: {{ radius }}m</div>
+            <v-slider v-model="radius" :min="100" :max="3000" :step="100" density="compact" hide-details />
+          </div>
+        </div>
       </div>
-    </div>
+      <div v-else class="map-controls-collapsed bottom-right" ref="mapControlsRef">
+        <v-btn icon color="primary" class="control-fab controls-toggle" @click="toggleControls">
+          <v-icon>mdi-tune</v-icon>
+        </v-btn>
+      </div>
+    </transition>
 
     <!-- 下固定の投稿フォーム -->
-    <div class="post-bar">
+    <div class="post-bar" ref="postBarRef">
+      <!-- アラートをフォーム上のオーバーレイとして表示（レイアウトを変えない） -->
+      <div v-if="alertMessage" class="post-alert">
+        <div class="post-alert-box">
+          <v-alert type="error" variant="flat" density="comfortable">
+            {{ alertMessage }}
+          </v-alert>
+        </div>
+      </div>
       <v-form class="post-form" @submit.prevent="submitPost" >
         <v-text-field
           v-model="message"
@@ -449,9 +540,6 @@ onMounted(() => {
         </v-text-field>
         <v-btn class="ml-2" color="success rounded-pill"  :disabled="isPosting" :loading="isPosting" type="submit">投稿</v-btn>
       </v-form>
-      <v-alert v-if="alertMessage" type="error" variant="tonal" density="comfortable" class="mt-1">
-        {{ alertMessage }}
-      </v-alert>
     </div>
   </div>
 </template>
@@ -460,7 +548,8 @@ onMounted(() => {
 .map-page {
   position: relative;
   width: 100%;
-  height: 100dvh;
+  height: 100%; /* ヘッダー/フッター分をVuetifyのレイアウトで差し引いた残り全体 */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 .map-full {
   position: absolute;
@@ -468,27 +557,86 @@ onMounted(() => {
 }
 .map-controls {
   position: absolute;
-  /* ヘッダー(v-app-bar app)の高さを考慮して配置 */
-  top: calc(var(--v-layout-top, 0px) + 12px);
-  left: 12px;
+  /* 右下配置に切替（bottom-rightクラスで調整） */
   z-index: 500;
+  max-width: 600px ;
   display: flex;
   align-items: center;
+  flex-wrap: wrap; /* 小幅では折り返す */
+  gap: 8px 10px;
   background: rgba(255, 255, 255, 0.9);
   border-radius: 8px;
   padding: 8px 10px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
+.map-controls.bottom-right {
+  right: 12px;
+  bottom: var(--controls-bottom-offset, 84px);
+}
+.map-controls-collapsed {
+  position: absolute;
+  right: 12px;
+  bottom: var(--controls-bottom-offset, 84px);
+  z-index: 500;
+}
+.control-fab {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+/* 展開/折りたたみアニメーション */
+.controls-fade-enter-active,
+.controls-fade-leave-active {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.controls-fade-enter-from,
+.controls-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+/* トグルボタンの回転で状態を示す（同一アイコンを統一） */
+.controls-toggle.open :deep(.v-icon) {
+  transform: rotate(180deg);
+  transition: transform 160ms ease;
+}
+.controls-toggle :deep(.v-icon) {
+  transition: transform 160ms ease;
+}
+.controls-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.controls-title {
+  font-size: 14px;
+  margin-left: 4px;
+}
+.controls-spacer {
+  flex: 1 1 auto;
+}
+.controls-body {
+  width: 100%;
+}
+
+.option-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .radius-control {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 220px;
+  flex: 1 1 240px; /* 可能なら広がり、狭いときは折り返し */
+  min-width: 0; /* 折り返し時のはみ出し防止 */
 }
 .radius-label {
   font-size: 12px;
   color: rgba(0,0,0,0.6);
-  min-width: 80px;
+  min-width: 64px;
 }
 .post-bar {
   position: absolute; /* 地図（map-page）の下側に配置 */
@@ -500,20 +648,60 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 2px 12px rgba(0,0,0,0.15);
   border-radius: 9999px;
+  /* iOSのセーフエリアに配慮 */
+  margin-bottom: env(safe-area-inset-bottom);
 }
 .post-form {
   display: flex;
   align-items: center;
 }
 
-/* Leafletのズームコントロールもヘッダー高さ分だけ下げる */
-:global(.leaflet-top.leaflet-left) {
-  top: calc(var(--v-layout-top, 0px) + 60px);
-  left: 12px;
+/* フォームの上に重ねるアラート（高さを変えない） */
+.post-alert {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 700;
 }
-:global(.leaflet-top.leaflet-right) {
-  top: calc(var(--v-layout-top, 0px) + 60px);
-  right: 12px;
+
+.post-alert-box {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+}
+
+/* Leafletのズームコントロールを右下へ、投稿フォーム高さに連動 */
+:global(.leaflet-bottom.leaflet-right) {
+  right: 6px;
+  bottom: var(--zoom-bottom-offset, 84px);
+}
+
+/* ズームコントロールの位置変更にアニメーションを付与 */
+:global(.leaflet-bottom.leaflet-right) {
+  transition: bottom 160ms ease;
+  will-change: bottom;
+}
+
+/* Vuetify内部要素の幅制御（スライダーを詰まらせない） */
+:deep(.v-slider) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+:deep(.v-btn) {
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .map-controls {
+    gap: 6px 8px;
+  }
+  .radius-control {
+    flex: 1 1 100%;
+  }
+  .radius-label {
+    min-width: 56px;
+  }
 }
 </style>
 
