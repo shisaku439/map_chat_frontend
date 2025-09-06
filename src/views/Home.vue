@@ -237,9 +237,41 @@ function renderNearbyMarkers() {
     map.on('zoomend', openRepresentativePopup)
     // ズームでクラスターから外れたマーカーは自動で吹き出しを開く
     map.on('zoomend', openVisibleMarkerPopups)
+    // ズームで新しく現れるクラスタにも自動で吹き出しを開く
+    map.on('zoomend', openVisibleClusterPopups)
   }
   // 初回レンダリング時も、クラスターされていないものは開く
   openVisibleMarkerPopups()
+}
+
+// 可視状態のクラスタ（=親がクラスタで自分が親ではない）に対して
+// 子マーカーの内容を集約した吹き出しを自動で開く
+function openVisibleClusterPopups() {
+  if (!nearbyLayer) return
+  const grp: any = nearbyLayer as any
+  const uniqueParents = new Set<any>()
+  createdMarkers.forEach((m) => {
+    const parent: any = grp.getVisibleParent(m)
+    if (parent && parent !== m) {
+      uniqueParents.add(parent)
+    }
+  })
+  uniqueParents.forEach((parent) => {
+    const children = parent.getAllChildMarkers ? parent.getAllChildMarkers() : []
+    if (!children || children.length === 0) return
+    children.sort((a: any, b: any) => {
+      const ad = new Date(a.__postMeta?.createdAt || 0).getTime()
+      const bd = new Date(b.__postMeta?.createdAt || 0).getTime()
+      return bd - ad
+    })
+    const html = children
+      .slice(0, 5)
+      .map((cm: any) => (cm.getPopup && cm.getPopup()) ? cm.getPopup().getContent() : '')
+      .join('<hr/>')
+    if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(html)
+    else parent.bindPopup(html, { autoClose: false, closeOnClick: false })
+    parent.openPopup()
+  })
 }
 
 // 代表ポップアップを開く
