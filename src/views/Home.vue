@@ -270,7 +270,9 @@ function openVisibleClusterPopups() {
       .join('<hr/>')
     if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(html)
     else parent.bindPopup(html, { autoClose: false, closeOnClick: false })
-    parent.openPopup()
+    if (!(parent as any).isPopupOpen || !(parent as any).isPopupOpen()) {
+      parent.openPopup()
+    }
   })
 }
 
@@ -279,8 +281,6 @@ function openVisibleClusterPopups() {
 // - 個別マーカーとして可視なら、そのマーカーのポップアップを開く
 function openRepresentativePopup() {
   if (!map || !nearbyLayer || !representativeMarker) return
-  // いったん既存のポップアップを閉じる
-  map.closePopup()
   const grp: any = nearbyLayer as any
   const parent: any = grp.getVisibleParent(representativeMarker)
   if (parent && parent !== representativeMarker) {
@@ -297,9 +297,12 @@ function openRepresentativePopup() {
       .join('<hr/>')
     if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(html)
     else parent.bindPopup(html, { autoClose: false, closeOnClick: false })
-    parent.openPopup()
+    if (!(parent as any).isPopupOpen || !(parent as any).isPopupOpen()) {
+      parent.openPopup()
+    }
   } else {
-    representativeMarker.openPopup()
+    const isOpen = (representativeMarker as any).isPopupOpen ? (representativeMarker as any).isPopupOpen() : false
+    if (!isOpen) representativeMarker.openPopup()
   }
 }
 
@@ -310,8 +313,9 @@ function openVisibleMarkerPopups() {
   createdMarkers.forEach((m) => {
     const parent: any = grp.getVisibleParent(m)
     if (!parent || parent === m) {
-      // 個別に表示されているので開く（autoClose: false のため併存可能）
-      m.openPopup()
+      // 既に開いていなければ開く
+      const isOpen = (m as any).isPopupOpen ? (m as any).isPopupOpen() : false
+      if (!isOpen) m.openPopup()
     }
   })
 }
