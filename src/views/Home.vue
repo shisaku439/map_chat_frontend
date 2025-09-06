@@ -152,6 +152,17 @@ function toggleControls() {
   requestAnimationFrame(() => updateUiOffsets())
 }
 
+// 外側タップで閉じる
+function onGlobalPointerDown(ev: PointerEvent) {
+  if (!controlsOpen.value) return
+  const panel = mapControlsRef.value
+  if (!panel) return
+  const target = ev.target as Node | null
+  if (target && panel.contains(target)) return
+  controlsOpen.value = false
+  requestAnimationFrame(() => updateUiOffsets())
+}
+
 // 周辺投稿の取得
 async function fetchNearby() {
   const lat = coords.value?.latitude
@@ -453,6 +464,8 @@ onMounted(() => {
     controlsResizeObserver.observe(postBarRef.value)
   }
   window.addEventListener('resize', updateUiOffsets)
+  // 外側タップで閉じる（モバイル含む）
+  document.addEventListener('pointerdown', onGlobalPointerDown, { passive: true })
 })
 
 onBeforeUnmount(() => {
@@ -464,6 +477,7 @@ onBeforeUnmount(() => {
   }
   controlsResizeObserver = null
   window.removeEventListener('resize', updateUiOffsets)
+  document.removeEventListener('pointerdown', onGlobalPointerDown)
 })
 </script>
 
