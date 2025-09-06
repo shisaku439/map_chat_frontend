@@ -434,6 +434,14 @@ onMounted(() => {
 
     <!-- 下固定の投稿フォーム -->
     <div class="post-bar">
+      <!-- アラートをフォーム上のオーバーレイとして表示（レイアウトを変えない） -->
+      <div v-if="alertMessage" class="post-alert">
+        <div class="post-alert-box">
+          <v-alert type="error" variant="flat" density="comfortable">
+            {{ alertMessage }}
+          </v-alert>
+        </div>
+      </div>
       <v-form class="post-form" @submit.prevent="submitPost" >
         <v-text-field
           v-model="message"
@@ -449,9 +457,6 @@ onMounted(() => {
         </v-text-field>
         <v-btn class="ml-2" color="success rounded-pill"  :disabled="isPosting" :loading="isPosting" type="submit">投稿</v-btn>
       </v-form>
-      <v-alert v-if="alertMessage" type="error" variant="tonal" density="comfortable" class="mt-1">
-        {{ alertMessage }}
-      </v-alert>
     </div>
   </div>
 </template>
@@ -504,6 +509,21 @@ onMounted(() => {
 .post-form {
   display: flex;
   align-items: center;
+}
+
+/* フォームの上に重ねるアラート（高さを変えない） */
+.post-alert {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 700;
+}
+
+.post-alert-box {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
 }
 
 /* Leafletのズームコントロールもヘッダー高さ分だけ下げる */
