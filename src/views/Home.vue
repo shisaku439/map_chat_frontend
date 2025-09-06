@@ -65,7 +65,7 @@ function showAlert(msg: string, ms = 4000) {
 // - following: 現在地に地図を追従するかのフラグ
 // - useGeolocation: 高精度・タイムアウトなどのオプションを指定
 const following = ref(true)
-const { coords, error: geoError, resume } = useGeolocation({
+const { coords, resume } = useGeolocation({
   enableHighAccuracy: true,
   maximumAge: 10_000,
   timeout: 10_000,
