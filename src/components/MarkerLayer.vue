@@ -28,6 +28,7 @@ let createdMarkers: L.Marker[] = []
 let representativeMarker: L.Marker | null = null
 let popupPersistAttached = false
 const { mountAggregated } = usePopups()
+let clusterAnimationHookAttached = false
 
 /** レイヤを遅延初期化して地図に追加する */
 function ensureLayer() {
@@ -78,14 +79,23 @@ function renderDiff() {
   }
   createdMarkers = Array.from(markerById.values())
   representativeMarker = createdMarkers[0] ?? null
-  openRepresentativePopup()
+  // ズーム直後はクラスタの再配置が走るため、少し遅らせて開く
+  setTimeout(() => {
+    openRepresentativePopup()
+    openVisibleMarkerPopups()
+    openVisibleClusterPopups()
+  }, 0)
   if (!popupPersistAttached && props.map) {
     popupPersistAttached = true
     ;(props.map as any).on('zoomend', openRepresentativePopup)
     ;(props.map as any).on('zoomend', openVisibleMarkerPopups)
     ;(props.map as any).on('zoomend', openVisibleClusterPopups)
   }
-  openVisibleMarkerPopups()
+  // マーカークラスタのアニメーション終了後にも再判定して開く
+  if (layer && !clusterAnimationHookAttached) {
+    (layer as any).on('animationend', openVisibleClusterPopups)
+    clusterAnimationHookAttached = true
+  }
 }
 
 /**
@@ -176,6 +186,10 @@ onBeforeUnmount(() => {
     ;(props.map as any).off('zoomend', openRepresentativePopup)
     ;(props.map as any).off('zoomend', openVisibleMarkerPopups)
     ;(props.map as any).off('zoomend', openVisibleClusterPopups)
+  }
+  if (layer && clusterAnimationHookAttached) {
+    ;(layer as any).off('animationend', openVisibleClusterPopups)
+    clusterAnimationHookAttached = false
   }
   if (layer && props.map) {
     props.map.removeLayer(layer)
