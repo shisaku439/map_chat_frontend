@@ -57,7 +57,7 @@ function renderDiff() {
     if (!m) {
       const icon = L.divIcon({ className: 'comment-dot', html: '<div class="dot"></div>', iconSize: [22,22], iconAnchor: [11,11], popupAnchor: [0,-12] })
       m = L.marker([p.lat, p.lng], { icon })
-      m.bindPopup(markerHtml(p), { autoClose: false, closeOnClick: false })
+      m.bindPopup(markerHtml(p), { autoClose: false, closeOnClick: false, autoPan: false })
       ;(m as any).__postMeta = p
       markerById.set(p.id, m)
       layer?.addLayer(m)
@@ -107,8 +107,13 @@ function openVisibleClusterPopups() {
     children.sort((a: any, b: any) => new Date(b.__postMeta?.createdAt || 0).getTime() - new Date(a.__postMeta?.createdAt || 0).getTime())
     const items = children.slice(0, 5).map((cm: any) => (cm.getPopup && cm.getPopup()) ? cm.getPopup().getContent() : '')
     const { el } = mountAggregated(items)
-    if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(el)
-    else parent.bindPopup(el, { autoClose: false, closeOnClick: false })
+    if (parent.getPopup && parent.getPopup()) {
+      const pop = parent.getPopup()
+      if (pop) pop.options.autoPan = false
+      parent.getPopup().setContent(el)
+    } else {
+      parent.bindPopup(el, { autoClose: false, closeOnClick: false, autoPan: false })
+    }
     if (!(parent as any).isPopupOpen || !(parent as any).isPopupOpen()) parent.openPopup()
     emit('clusterOpened', children.length)
   })
@@ -129,8 +134,13 @@ function openRepresentativePopup() {
     children.sort((a: any, b: any) => new Date(b.__postMeta?.createdAt || 0).getTime() - new Date(a.__postMeta?.createdAt || 0).getTime())
     const items = children.slice(0, 5).map((cm: any) => (cm.getPopup && cm.getPopup()) ? cm.getPopup().getContent() : '')
     const { el } = mountAggregated(items)
-    if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(el)
-    else parent.bindPopup(el, { autoClose: false, closeOnClick: false })
+    if (parent.getPopup && parent.getPopup()) {
+      const pop = parent.getPopup()
+      if (pop) pop.options.autoPan = false
+      parent.getPopup().setContent(el)
+    } else {
+      parent.bindPopup(el, { autoClose: false, closeOnClick: false, autoPan: false })
+    }
     if (!(parent as any).isPopupOpen || !(parent as any).isPopupOpen()) parent.openPopup()
     emit('clusterOpened', children.length)
   } else {
