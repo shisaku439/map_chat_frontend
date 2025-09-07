@@ -68,7 +68,7 @@ function showAlert(msg: string, ms = 4000) {
 // Geolocation（現在地の取得と地図への反映）
 // - following: 現在地に地図を追従するかのフラグ
 // - useGeolocation: 高精度・タイムアウトなどのオプションを指定
-const { following, attachMapFollowHandlers } = useFollow()
+const { following, attachMapFollowHandlers, recenter } = useFollow()
 const controlsOpen = ref(true)
 const { coords, resume } = useGeolocation({
   enableHighAccuracy: true,
@@ -126,7 +126,13 @@ function getUserIcon(): L.DivIcon {
 }
 
 // 手動で現在地へ再センタリング（追従もONに）
-function recenterToUser() { updateUserLocationOnMap() }
+function recenterToUser() {
+  if (!map) return
+  const lat = coords.value?.latitude
+  const lng = coords.value?.longitude
+  if (lat == null || lng == null) return
+  recenter(map, lat, lng)
+}
 
 // 旧: MapControlsに移管（未使用）
 
