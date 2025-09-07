@@ -1,8 +1,18 @@
 <script setup lang="ts">
-// Day3: 現在地取得・地図上のユーザーピン表示・追従/再センタリングUIを実装
+// Home 画面
+// - 地図（Leaflet）とリアルタイム（Socket）を扱う中核
+// - MapControls/PostBar を子コンポーネントとして読み込み
+// - ちらつき対策: 差分レンダリング + isPopupOpen ガード
 import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import L from 'leaflet'
-import { io, Socket } from 'socket.io-client'
+import { io } from 'socket.io-client'
+import PostBar from '../components/PostBar.vue'
+import MapControls from '../components/MapControls.vue'
+import MapCanvas from '../components/MapCanvas.vue'
+import MarkerLayer from '../components/MarkerLayer.vue'
+import { useNearby } from '../composables/useNearby'
+import { useMapOffsets } from '../composables/useMapOffsets'
+import { useFollow } from '../composables/useFollow'
 import { useGeolocation } from '@vueuse/core'
 import { useAuthStore } from '../stores/auth'
 // マーカークラスタリング（重なりをまとめて表示）
@@ -13,51 +23,31 @@ import 'leaflet.markercluster'
 const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? 'http://localhost:5000'
 
 // Leaflet の地図コンテナ参照とインスタンス
-const mapPage = ref<HTMLDivElement | null>(null)
-const mapContainer = ref<HTMLDivElement | null>(null)
-const mapControlsRef = ref<HTMLDivElement | null>(null)
-const postBarRef = ref<HTMLDivElement | null>(null)
+// - mapPage: 右下UIのオフセット等をCSSカスタムプロパティで適用するラッパ
+// - mapContainer: Leafletのマップ本体
+// - mapControlsRef / postBarRef: サイズ監視し、オフセット再計算へ反映
+const { mapPage, mapContainer, mapControlsRef, postBarRef, updateUiOffsets } = useMapOffsets()
 let map: L.Map | null = null
 let userMarker: L.Marker | null = null
 let accuracyCircle: L.Circle | null = null
 let searchCircle: L.Circle | null = null
 
-let socket: Socket | null = null
+let socket: ReturnType<typeof io> | null = null
 const auth = useAuthStore()
 const message = ref('')
 const isPosting = ref(false)
 // 周辺投稿（Day5）
 const radius = ref(1000) // 100〜3000m（既定1,000m）
-// 近傍投稿の状態と、地図上に描画するクラスタレイヤ
+// 近傍投稿の状態
 const nearby = ref<{ id: number; userId: number; message: string; lat: number; lng: number; createdAt: string; distance: number }[]>([])
-let nearbyLayer: L.MarkerClusterGroup | null = null
-let createdMarkers: L.Marker[] = []
 // ポップアップの重なり順を管理（クリックで最前面へ）
 let nextPopupZ = 10000
 // 開いたポップアップ要素ごとに、付与したイベントハンドラを追跡してクリーンアップ
 const popupHandlers = new WeakMap<HTMLElement, (ev: Event) => void>()
 
-// 「代表」ポップアップ：ズームしても常に見える吹き出しを維持するための基準マーカー
-let representativeMarker: L.Marker | null = null
+// 代表・クラスタポップアップ等は MarkerLayer へ移管
 
-// ズームイベントへのハンドラを重複で貼らないためのフラグ
-let popupPersistAttached = false
-
-// map-controls と post-bar の高さに応じて右下配置のオフセットを可変にする
-let controlsResizeObserver: ResizeObserver | null = null
-function updateUiOffsets() {
-  const postH = postBarRef.value?.offsetHeight ?? 0
-  // ズームUI高さをDOMから自動取得（無ければ100pxを既定値に）
-  const zoomEl = mapContainer.value?.querySelector(
-    '.leaflet-bottom.leaflet-right .leaflet-control-zoom'
-  ) as HTMLElement | null
-  const zoomUiHeight = Math.max(zoomEl?.offsetHeight ?? 0, 56)
-  const zoomBottom = Math.max(postH + 12, 56)
-  mapPage.value?.style.setProperty('--zoom-bottom-offset', `${zoomBottom}px`)
-  // コントローラーはズームボタンの“上”に来るよう、ズームUIの高さ＋余白を加算
-  const controlsBottom = zoomBottom + Math.max(zoomUiHeight, 100) + 8
-  mapPage.value?.style.setProperty('--controls-bottom-offset', `${controlsBottom}px`)
-}
+// オフセット計算は useMapOffsets へ委譲
 
 // ログはブラウザコンソールへ出力
 function addLog(text: string) {
@@ -65,25 +55,20 @@ function addLog(text: string) {
   console.log(`[${new Date().toLocaleTimeString()}] ${text}`)
 }
 
-// 画面上部に一時的なアラートを表示
+// 画面上部に一時的なアラートを表示（PostBarへ渡す）
 const alertMessage = ref('')
 let alertTimer: number | null = null
 function showAlert(msg: string, ms = 4000) {
   alertMessage.value = msg
-  if (alertTimer) {
-    window.clearTimeout(alertTimer)
-  }
-  alertTimer = window.setTimeout(() => {
-    alertMessage.value = ''
-    alertTimer = null
-  }, ms)
+  if (alertTimer) window.clearTimeout(alertTimer)
+  alertTimer = window.setTimeout(() => { alertMessage.value = ''; alertTimer = null }, ms)
 }
 
 
 // Geolocation（現在地の取得と地図への反映）
 // - following: 現在地に地図を追従するかのフラグ
 // - useGeolocation: 高精度・タイムアウトなどのオプションを指定
-const following = ref(true)
+const { following, attachMapFollowHandlers } = useFollow()
 const controlsOpen = ref(true)
 const { coords, resume } = useGeolocation({
   enableHighAccuracy: true,
@@ -141,16 +126,9 @@ function getUserIcon(): L.DivIcon {
 }
 
 // 手動で現在地へ再センタリング（追従もONに）
-function recenterToUser() {
-  following.value = true
-  updateUserLocationOnMap()
-}
+function recenterToUser() { updateUserLocationOnMap() }
 
-function toggleControls() {
-  controlsOpen.value = !controlsOpen.value
-  // 折りたたみ直後にズームコントロール位置を更新
-  requestAnimationFrame(() => updateUiOffsets())
-}
+// 旧: MapControlsに移管（未使用）
 
 // 外側タップで閉じる
 function onGlobalPointerDown(ev: PointerEvent) {
@@ -162,6 +140,38 @@ function onGlobalPointerDown(ev: PointerEvent) {
   controlsOpen.value = false
   requestAnimationFrame(() => updateUiOffsets())
 }
+
+// MapCanvas からの受け取り時に、Leaflet Map へイベントを登録
+function onMapReady(m: L.Map, el: HTMLDivElement) {
+  map = m as any
+  mapContainer.value = el
+  ;(map as any).zoomControl.setPosition('bottomright')
+  attachMapFollowHandlers(m)
+
+  ;(map as any).on('popupopen', (e: any) => {
+    const elc = e?.popup?._container as HTMLElement | undefined
+    if (!elc) return
+    elc.style.zIndex = String(nextPopupZ++)
+    const bringToFront = () => { elc.style.zIndex = String(nextPopupZ++) }
+    popupHandlers.set(elc, bringToFront)
+    elc.addEventListener('pointerdown', bringToFront)
+    elc.addEventListener('click', bringToFront)
+  })
+
+  ;(map as any).on('popupclose', (e: any) => {
+    const elc = e?.popup?._container as HTMLElement | undefined
+    if (!elc) return
+    const handler = popupHandlers.get(elc)
+    if (!handler) return
+    elc.removeEventListener('pointerdown', handler)
+    elc.removeEventListener('click', handler)
+    popupHandlers.delete(elc)
+  })
+
+  // 初期のオフセット調整
+  updateUiOffsets()
+}
+
 
 // 周辺投稿の取得
 async function fetchNearby() {
@@ -186,7 +196,6 @@ async function fetchNearby() {
       return
     }
     nearby.value = data.items ?? []
-    renderNearbyMarkers()
     addLog(`周辺 ${nearby.value.length} 件`)
   } catch (e) {
     const msg = `周辺取得エラー: ${String(e)}`
@@ -197,128 +206,9 @@ async function fetchNearby() {
 
 // 周辺投稿を地図に描画
 // 近傍投稿をクラスタ表示し、代表ポップアップを開く
-function renderNearbyMarkers() {
-  if (!map) return
-  if (!nearbyLayer) {
-    nearbyLayer = L.markerClusterGroup({
-      showCoverageOnHover: false,
-      maxClusterRadius: 60,
-    }) as L.MarkerClusterGroup
-    map.addLayer(nearbyLayer)
-  }
-  nearbyLayer!.clearLayers()
-  createdMarkers = []
-  let firstMarker: L.Marker | null = null
-  nearby.value.forEach((p, idx) => {
-    // 個別コメントはピンではなく丸いアイコンで表示（クラスタの見た目に寄せる）
-    const icon = L.divIcon({
-      className: 'comment-dot',
-      html: '<div class="dot"></div>',
-      iconSize: [22, 22],
-      iconAnchor: [11, 11],
-      popupAnchor: [0, -12],
-    })
-    const m = L.marker([p.lat, p.lng], { icon })
-    m.bindPopup(`${p.message}<br/><span class="popup-time">${formatRelative(p.createdAt)}</span>`, {
-      autoClose: false,
-      closeOnClick: false,
-    })
-    // クラスタポップアップでの並び替えに使うメタ情報を保持
-    ;(m as any).__postMeta = p
-    nearbyLayer!.addLayer(m)
-    if (idx === 0) firstMarker = m
-    createdMarkers.push(m)
-  })
-  representativeMarker = firstMarker
-  openRepresentativePopup()
-  if (!popupPersistAttached && map) {
-    popupPersistAttached = true
-    // ズームでクラスタ構造が変わるたびに代表ポップアップを開き直す
-    map.on('zoomend', openRepresentativePopup)
-    // ズームでクラスターから外れたマーカーは自動で吹き出しを開く
-    map.on('zoomend', openVisibleMarkerPopups)
-    // ズームで新しく現れるクラスタにも自動で吹き出しを開く
-    map.on('zoomend', openVisibleClusterPopups)
-  }
-  // 初回レンダリング時も、クラスターされていないものは開く
-  openVisibleMarkerPopups()
-}
+// 旧: 差分レンダリングに移行（未使用）
 
-// 可視状態のクラスタ（=親がクラスタで自分が親ではない）に対して
-// 子マーカーの内容を集約した吹き出しを自動で開く
-function openVisibleClusterPopups() {
-  if (!nearbyLayer) return
-  const grp: any = nearbyLayer as any
-  const uniqueParents = new Set<any>()
-  createdMarkers.forEach((m) => {
-    const parent: any = grp.getVisibleParent(m)
-    if (parent && parent !== m) {
-      uniqueParents.add(parent)
-    }
-  })
-  uniqueParents.forEach((parent) => {
-    const children = parent.getAllChildMarkers ? parent.getAllChildMarkers() : []
-    if (!children || children.length === 0) return
-    children.sort((a: any, b: any) => {
-      const ad = new Date(a.__postMeta?.createdAt || 0).getTime()
-      const bd = new Date(b.__postMeta?.createdAt || 0).getTime()
-      return bd - ad
-    })
-    const html = children
-      .slice(0, 5)
-      .map((cm: any) => (cm.getPopup && cm.getPopup()) ? cm.getPopup().getContent() : '')
-      .join('<hr/>')
-    if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(html)
-    else parent.bindPopup(html, { autoClose: false, closeOnClick: false })
-    if (!(parent as any).isPopupOpen || !(parent as any).isPopupOpen()) {
-      parent.openPopup()
-    }
-  })
-}
-
-// 代表ポップアップを開く
-// - 代表がクラスター内に吸収されている場合は、クラスター自身に子マーカーの内容を束ねたポップアップを表示
-// - 個別マーカーとして可視なら、そのマーカーのポップアップを開く
-function openRepresentativePopup() {
-  if (!map || !nearbyLayer || !representativeMarker) return
-  const grp: any = nearbyLayer as any
-  const parent: any = grp.getVisibleParent(representativeMarker)
-  if (parent && parent !== representativeMarker) {
-    const children = parent.getAllChildMarkers ? parent.getAllChildMarkers() : [representativeMarker]
-    // 投稿時刻の新しい順に並べ替え（__postMeta.createdAt を利用）
-    children.sort((a: any, b: any) => {
-      const ad = new Date(a.__postMeta?.createdAt || 0).getTime()
-      const bd = new Date(b.__postMeta?.createdAt || 0).getTime()
-      return bd - ad
-    })
-    const html = children
-      .slice(0, 5)
-      .map((cm: any) => (cm.getPopup && cm.getPopup()) ? cm.getPopup().getContent() : '')
-      .join('<hr/>')
-    if (parent.getPopup && parent.getPopup()) parent.getPopup().setContent(html)
-    else parent.bindPopup(html, { autoClose: false, closeOnClick: false })
-    if (!(parent as any).isPopupOpen || !(parent as any).isPopupOpen()) {
-      parent.openPopup()
-    }
-  } else {
-    const isOpen = (representativeMarker as any).isPopupOpen ? (representativeMarker as any).isPopupOpen() : false
-    if (!isOpen) representativeMarker.openPopup()
-  }
-}
-
-// クラスタに含まれていない（=個別表示されている）マーカーの吹き出しを自動で開く
-function openVisibleMarkerPopups() {
-  if (!nearbyLayer) return
-  const grp: any = nearbyLayer as any
-  createdMarkers.forEach((m) => {
-    const parent: any = grp.getVisibleParent(m)
-    if (!parent || parent === m) {
-      // 既に開いていなければ開く
-      const isOpen = (m as any).isPopupOpen ? (m as any).isPopupOpen() : false
-      if (!isOpen) m.openPopup()
-    }
-  })
-}
+// 差分レンダリング/ポップアップは MarkerLayer に移管
 
 // 取得半径の円（検索範囲）を現在地に合わせて更新
 function updateSearchCircle() {
@@ -425,25 +315,20 @@ async function submitPost() {
 }
 
 onMounted(() => {
-  // 地図の初期化（東京駅付近に仮センタリング）
-  if (mapContainer.value) {
-    map = L.map(mapContainer.value).setView([35.681236, 139.767125], 14)
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map)
-    // ズームコントロールを右下へ
-    map.zoomControl.setPosition('bottomright')
-  }
+  // MapCanvas の ready で初期化済みになる
 
   // 初回の測位・監視を開始
   resume()
 
-  // 現在地が更新されたら地図表示に反映
+  // 現在地が更新されたら地図表示に反映（近距離ではfetchをデバウンス）
+  const nearbyCtl = useNearby({ distanceThresholdMeters: 50, debounceMs: 400 })
   watch(coords, () => {
     updateUserLocationOnMap()
-    // 位置が取れていれば周辺投稿も更新
-    if (coords.value?.latitude != null) fetchNearby()
+    const lat = coords.value?.latitude
+    const lng = coords.value?.longitude
+    if (lat != null && lng != null) {
+      nearbyCtl.onCoordsChange(lat, lng, fetchNearby)
+    }
   })
   // 半径変更で再取得
   watch(radius, () => {
@@ -452,67 +337,23 @@ onMounted(() => {
   })
 
   socket = io(API_ORIGIN)
-  socket.on('connect', () => addLog('socket connected'))
-  socket.on('connect_error', (err) => addLog(`socket connect_error: ${String(err)}`))
-  // Day6: 新規投稿が届いたら周辺を更新
-  socket.on('post_created', (d) => {
-    addLog(`post_created: ${JSON.stringify(d)}`)
-    fetchNearby()
-  })
+  if (socket && typeof (socket as any).on === 'function') {
+    socket.on('connect', () => addLog('socket connected'))
+    socket.on('connect_error', (err: any) => addLog(`socket connect_error: ${String(err)}`))
+    // Day6: 新規投稿が届いたら周辺を更新
+    socket.on('post_created', (d: any) => {
+      addLog(`post_created: ${JSON.stringify(d)}`)
+      fetchNearby()
+    })
+  }
 
-  // 地図操作で追従解除（ユーザーがドラッグ/ズームを始めたらOFF）
-  map?.on('dragstart', () => { following.value = false })
-  map?.on('zoomstart', () => { following.value = false })
-
-  // どのポップアップを開いても最前面に来るようZ-indexを上げる
-  map?.on('popupopen', (e: any) => {
-    const el = e?.popup?._container as HTMLElement | undefined
-    if (!el) return
-    // 開いた瞬間に前面へ
-    el.style.zIndex = String(nextPopupZ++)
-    // クリック/タップ時にも前面へ持ち上げる
-    const bringToFront = () => {
-      el.style.zIndex = String(nextPopupZ++)
-    }
-    popupHandlers.set(el, bringToFront)
-    el.addEventListener('pointerdown', bringToFront)
-    el.addEventListener('click', bringToFront)
-  })
-
-  // ポップアップを閉じたらイベントリスナを除去
-  map?.on('popupclose', (e: any) => {
-    const el = e?.popup?._container as HTMLElement | undefined
-    if (!el) return
-    const handler = popupHandlers.get(el)
-    if (!handler) return
-    el.removeEventListener('pointerdown', handler)
-    el.removeEventListener('click', handler)
-    popupHandlers.delete(el)
-  })
-
-  // map-controls / post-bar のサイズ変化とリサイズでオフセット更新
+  // オフセットは composable 内で監視・更新される
   updateUiOffsets()
-  if ('ResizeObserver' in window && mapControlsRef.value) {
-    controlsResizeObserver = new ResizeObserver(() => updateUiOffsets())
-    controlsResizeObserver.observe(mapControlsRef.value)
-  }
-  if (postBarRef.value && controlsResizeObserver) {
-    controlsResizeObserver.observe(postBarRef.value)
-  }
-  window.addEventListener('resize', updateUiOffsets)
   // 外側タップで閉じる（モバイル含む）
   document.addEventListener('pointerdown', onGlobalPointerDown, { passive: true })
 })
 
 onBeforeUnmount(() => {
-  if (controlsResizeObserver && mapControlsRef.value) {
-    controlsResizeObserver.unobserve(mapControlsRef.value)
-  }
-  if (controlsResizeObserver && postBarRef.value) {
-    controlsResizeObserver.unobserve(postBarRef.value)
-  }
-  controlsResizeObserver = null
-  window.removeEventListener('resize', updateUiOffsets)
   document.removeEventListener('pointerdown', onGlobalPointerDown)
 })
 </script>
@@ -520,62 +361,25 @@ onBeforeUnmount(() => {
 <template>
   <div class="map-page" ref="mapPage">
     <!-- 地図（フルスクリーン） -->
-    <div ref="mapContainer" class="map-full" />
+    <MapCanvas @ready="onMapReady" />
+
+    <!-- マーカーレイヤ（差分レンダリング + クラスタ + ポップアップ制御） -->
+    <MarkerLayer :map="map as any" :posts="nearby" :format-relative="formatRelative" />
 
     <!-- 地図内コントロール（開閉） -->
-    <transition name="controls-fade">
-      <div v-if="controlsOpen" class="map-controls bottom-right" ref="mapControlsRef">
-        <div class="controls-header">
+    <!-- MapControlsのDOM要素を監視するためにラッパーdivにrefを付与 -->
+    <div ref="mapControlsRef">
+      <MapControls
+        v-model:open="controlsOpen"
+        v-model:radius="radius"
+        @recenter="recenterToUser"
+        @refresh="fetchNearby"
+      />
+    </div>
 
-          <div class="controls-title">オプション</div>
-          <v-spacer />
-          <v-btn icon variant="text" density="comfortable" @click="toggleControls" class="controls-toggle open" aria-label="閉じる">
-            <v-icon>mdi-close</v-icon>
-          </v-btn>
-        </div>
-        <div class="controls-body">
-          <div class="option-item">
-            <v-btn density="comfortable" color="primary" variant="tonal" @click="recenterToUser">現在地へ</v-btn>
-            <v-btn size="small" variant="tonal" @click="fetchNearby">再取得</v-btn>
-          </div>
-          <div class="radius-control ml-2">
-            <div class="radius-label">半径: {{ radius }}m</div>
-            <v-slider v-model="radius" :min="100" :max="3000" :step="100" density="compact" hide-details />
-          </div>
-        </div>
-      </div>
-      <div v-else class="map-controls-collapsed bottom-right" ref="mapControlsRef">
-        <v-btn icon color="primary" class="control-fab controls-toggle" @click="toggleControls">
-          <v-icon>mdi-tune</v-icon>
-        </v-btn>
-      </div>
-    </transition>
-
-    <!-- 下固定の投稿フォーム -->
-    <div class="post-bar" ref="postBarRef">
-      <!-- アラートをフォーム上のオーバーレイとして表示（レイアウトを変えない） -->
-      <div v-if="alertMessage" class="post-alert">
-        <div class="post-alert-box">
-          <v-alert type="error" variant="flat" density="comfortable">
-            {{ alertMessage }}
-          </v-alert>
-        </div>
-      </div>
-      <v-form class="post-form" @submit.prevent="submitPost" >
-        <v-text-field
-          v-model="message"
-          variant=""
-          density="comfortable"
-          maxlength="280"
-          placeholder="今の気持ちをシェアしよう（最大280文字）"
-          hide-details="auto"
-        >
-          <template #append-inner>
-            <span class="field-counter">{{ message.length }}/280</span>
-          </template>
-        </v-text-field>
-        <v-btn class="ml-2" color="success rounded-pill"  :disabled="isPosting" :loading="isPosting" type="submit">投稿</v-btn>
-      </v-form>
+    <!-- 下固定の投稿フォーム（DOM要素を参照するためラッパーで囲む） -->
+    <div ref="postBarRef">
+      <PostBar v-model="message" :loading="isPosting" :alert="alertMessage" @submit="submitPost" />
     </div>
   </div>
 </template>
@@ -674,38 +478,7 @@ onBeforeUnmount(() => {
   color: rgba(0,0,0,0.6);
   min-width: 64px;
 }
-.post-bar {
-  position: absolute; /* 地図（map-page）の下側に配置 */
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
-  z-index: 600;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-  border-radius: 9999px;
-  /* iOSのセーフエリアに配慮 */
-  margin-bottom: env(safe-area-inset-bottom);
-}
-.post-form {
-  display: flex;
-  align-items: center;
-}
-
-/* フォームの上に重ねるアラート（高さを変えない） */
-.post-alert {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 700;
-}
-
-.post-alert-box {
-  background: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-}
+/* PostBarへ移動 */
 
 /* Leafletのズームコントロールを右下へ、投稿フォーム高さに連動 */
 :global(.leaflet-bottom.leaflet-right) {
