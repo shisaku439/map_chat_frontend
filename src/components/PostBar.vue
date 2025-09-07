@@ -1,4 +1,8 @@
 <script setup lang="ts">
+// 下部固定の投稿フォーム + 直上アラートのコンポーネント
+// - v-model: 入力中メッセージ
+// - loading: 投稿中のボタン状態
+// - alert: 直上に表示するエラーメッセージ
 import { computed } from 'vue'
 
 const props = defineProps<{
@@ -6,16 +10,19 @@ const props = defineProps<{
   loading?: boolean
   alert?: string
 }>()
+
 const emit = defineEmits<{
   (e: 'update:modelValue', v: string): void
   (e: 'submit'): void
 }>()
 
+// フォームのテキストフィールドを親の v-model と同期
 const message = computed({
   get: () => props.modelValue,
   set: (v: string) => emit('update:modelValue', v),
 })
 
+// 送信トリガ（親が submit ハンドラを持つ）
 function onSubmit() {
   emit('submit')
 }
@@ -28,6 +35,7 @@ function onSubmit() {
         <v-alert type="error" variant="flat" density="comfortable">{{ alert }}</v-alert>
       </div>
     </div>
+    <!-- 入力と送信ボタンを横並びに配置 -->
     <v-form class="post-form" @submit.prevent="onSubmit">
       <v-text-field
         v-model="message"
