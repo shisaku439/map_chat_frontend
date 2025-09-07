@@ -30,7 +30,8 @@ export function useMapOffsets(options?: { minZoomBottom?: number; minControlsBot
      * @returns {void}
      */
     function updateUiOffsets() {
-        const postH = postBarRef.value?.offsetHeight ?? 0
+        const postInner = (postBarRef.value?.firstElementChild as HTMLElement | null) ?? postBarRef.value
+        const postH = postInner?.offsetHeight ?? 0
         const zoomEl = mapContainer.value?.querySelector(
             '.leaflet-bottom.leaflet-right .leaflet-control-zoom'
         ) as HTMLElement | null

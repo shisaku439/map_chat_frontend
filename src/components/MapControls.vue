@@ -16,7 +16,7 @@ function toggle() { open.value = !open.value }
 </script>
 
 <template>
-  <transition name="controls-fade">
+  <transition name="controls-expand">
     <div v-if="open" class="map-controls bottom-right">
       <div class="controls-header">
         <div class="controls-title">オプション</div>
@@ -57,9 +57,10 @@ function toggle() { open.value = !open.value }
   border-radius: 8px;
   padding: 8px 10px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  transform-origin: bottom right;
 }
 .map-controls.bottom-right { right: 12px; bottom: var(--controls-bottom-offset, 84px); }
-.map-controls-collapsed { position: absolute; right: 12px; bottom: var(--controls-bottom-offset, 84px); z-index: 500; }
+.map-controls-collapsed { position: absolute; right: 12px; bottom: var(--controls-bottom-offset, 84px); z-index: 500; transform-origin: bottom right; }
 .control-fab { width: 44px; height: 44px; border-radius: 50%; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
 .controls-header { display: flex; align-items: center; width: 100%; }
 .controls-title { font-size: 14px; margin-left: 4px; }
@@ -69,8 +70,9 @@ function toggle() { open.value = !open.value }
 .radius-label { font-size: 12px; color: rgba(0,0,0,0.6); min-width: 64px; }
 :deep(.v-slider) { min-width: 0; flex: 1 1 auto; }
 :deep(.v-btn) { white-space: nowrap; }
-.controls-fade-enter-active, .controls-fade-leave-active { transition: opacity 160ms ease, transform 160ms ease; }
-.controls-fade-enter-from, .controls-fade-leave-to { opacity: 0; transform: translateY(-6px); }
+.controls-expand-enter-active, .controls-expand-leave-active { transition: transform 180ms ease, opacity 140ms ease, border-radius 180ms ease; }
+.controls-expand-enter-from { transform: scale(0.9); opacity: 0; }
+.controls-expand-leave-to { transform: none; opacity: 0; }
 .controls-toggle.open :deep(.v-icon) { transform: rotate(180deg); transition: transform 160ms ease; }
 .controls-toggle :deep(.v-icon) { transition: transform 160ms ease; }
 
